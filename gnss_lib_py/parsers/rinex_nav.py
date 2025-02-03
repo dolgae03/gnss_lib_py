@@ -156,6 +156,20 @@ class RinexNav(NavData):
                                                       data["gps_week"])
         elif "GALWeek" in data.columns:
             data = data.rename(columns={"GALWeek":"gps_week"})
+        elif 'BDTWeek' in data.columns:
+            data = data.rename(columns={"BDTWeek":"gps_week"})
+        
+        if 'TGD1' not in data.columns:
+            data['TGD1'] = np.nan
+
+        bd_mask = data['sv_id'].str.startswith('C')
+
+        data.loc[bd_mask, 'sv_num'] = data.loc[bd_mask, 'sv_id'].str.extract(r'C(\d+)', expand=False).astype(int)
+
+        data.loc[bd_mask, 'TGD'] = np.where(data.loc[bd_mask, 'sv_num'] <= 20,
+                                            data.loc[bd_mask, 'TGD1'],
+                                            data.loc[bd_mask, 'TGD2'])
+
         if len(data) == 0:
             raise RuntimeError("No ephemeris data available for the " \
                              + "given satellites")
