@@ -231,7 +231,9 @@ class AndroidRawGnss(NavData):
 
         # add pseudorange uncertainty
         self["raw_pr_sigma_m"] = consts.C * 1E-9 * self["ReceivedSvTimeUncertaintyNanos"]
-
+        self['clock_drift'] = consts.C * 1E-9 * self["ReceivedSvTimeUncertaintyNanos"]
+        self['clock_drift_uncertainty'] = consts.C * 1E-9 * self['DriftUncertaintyNanosPerSecond']
+        
         if self.filter_measurements:
             self.filter_raw_measurements(t_rx_secs)
 
