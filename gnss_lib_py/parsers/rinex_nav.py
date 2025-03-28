@@ -156,19 +156,25 @@ class RinexNav(NavData):
                                                       data["gps_week"])
         elif "GALWeek" in data.columns:
             data = data.rename(columns={"GALWeek":"gps_week"})
-        elif 'BDTWeek' in data.columns:
-            data = data.rename(columns={"BDTWeek":"gps_week"})
+
+
+        # ----------------------------------------------------------------
+        # Modified: mskim
         
-        if 'TGD1' not in data.columns:
-            data['TGD1'] = np.nan
+        bds_mask = data['sv_id'].str.startswith('C')  # BD 위성만 선택
+        
+        if any(bds_mask):
+            data.loc[bds_mask, 'TGD'] = data.loc[bds_mask, 'TGD1'].fillna(0)
+            data.loc[bds_mask, 'gps_week'] = (data.loc[bds_mask, 'BDTWeek'] + 1356).fillna(0)
+        
+        galileo_mask = data['sv_id'].str.startswith('E')
+        
+        if any(galileo_mask):
+            data.loc[galileo_mask, 'TGD1'] = data.loc[galileo_mask, 'BGDe5a'].fillna(0)
+            data.loc[galileo_mask, 'TGD2'] = data.loc[galileo_mask, 'BGDe5b'].fillna(0)
+            data.loc[galileo_mask, 'TGD'] = data.loc[galileo_mask, 'TGD1'].fillna(0)
 
-        bd_mask = data['sv_id'].str.startswith('C')
-
-        data.loc[bd_mask, 'sv_num'] = data.loc[bd_mask, 'sv_id'].str.extract(r'C(\d+)', expand=False).astype(int)
-
-        data.loc[bd_mask, 'TGD'] = np.where(data.loc[bd_mask, 'sv_num'] <= 20,
-                                            data.loc[bd_mask, 'TGD1'],
-                                            data.loc[bd_mask, 'TGD2'])
+        # -----------------------------------------------
 
         if len(data) == 0:
             raise RuntimeError("No ephemeris data available for the " \
