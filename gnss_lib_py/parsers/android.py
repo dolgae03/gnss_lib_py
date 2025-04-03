@@ -157,10 +157,20 @@ class AndroidRawGnss(NavData):
         self["gps_millis"] = unix_to_gps_millis(self["unix_millis"])
 
         # calculate pseudorange
-        gps_week_nanos = np.floor(-self["FullBiasNanos"]*1e-9/consts.WEEKSEC)*consts.WEEKSEC*1E9
-        tx_rx_gnss_ns = self["TimeNanos"] - self["FullBiasNanos",0] + self["TimeOffsetNanos"] - self["BiasNanos",0]
+        # FullBiasNanos 관련 계산을 float64로 강제
+        full_bias_nanos = self["FullBiasNanos"].astype(np.float64)
+        time_nanos = self["TimeNanos"].astype(np.float64)
+        time_offset_nanos = self["TimeOffsetNanos"].astype(np.float64)
+        bias_nanos = self["BiasNanos"].astype(np.float64)
 
-        t_rx_secs = np.zeros(len(self))
+        # GPS 주 계산
+        gps_week_nanos = np.floor(-full_bias_nanos * 1e-9 / consts.WEEKSEC) * consts.WEEKSEC * 1e9
+
+        # 송신-수신 시간차 계산
+        tx_rx_gnss_ns = time_nanos - full_bias_nanos + time_offset_nanos - bias_nanos
+
+        # 수신 시간 초기화
+        t_rx_secs = np.zeros(len(self), dtype=np.float64)
 
         # gps constellation
         tx_rx_gps_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
@@ -214,8 +224,14 @@ class AndroidRawGnss(NavData):
                              tx_rx_unknown_secs,
                              t_rx_secs)
 
-        t_tx_secs = self["ReceivedSvTimeNanos"]*1E-9
-        self["raw_pr_m"] = (t_rx_secs - t_tx_secs)*consts.C
+        # 송신 시각을 float64로 변환하여 초 단위로
+        t_tx_secs = self["ReceivedSvTimeNanos"].astype(np.float64) * 1e-9
+
+        # 수신 시각과 송신 시각 차이로부터 의사거리 계산
+        raw_pr_m = (t_rx_secs - t_tx_secs) * consts.C  # t_rx_secs는 이미 float64
+
+        # 결과를 float64로 명시한 후 저장
+        self["raw_pr_m"] = raw_pr_m.astype(np.float64)
 
         if self.remove_rx_b_from_pr:
             # remove the receiver's clock bias at the first timestamp
