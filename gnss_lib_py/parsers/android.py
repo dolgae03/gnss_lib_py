@@ -121,7 +121,18 @@ class AndroidRawGnss(NavData):
                                     skip_blank_lines = False,
                                     header = header_row,
                                     skiprows = skip_rows,
-                                    dtype={'AccumulatedDeltaRangeUncertaintyMeters':np.float64},
+                                        dtype={
+                                            'AccumulatedDeltaRangeUncertaintyMeters': np.float64,
+                                            'TimeOffsetNanos': np.float64,
+                                            'BiasNanos': np.float64,
+                                            'ReceivedSvTimeUncertaintyNanos': np.float64,
+                                            'DriftNanosPerSecond': np.float64,
+                                            'DriftUncertaintyNanosPerSecond': np.float64,
+                                            
+                                            'FullBiasNanos': np.int64,
+                                            'TimeNanos': np.int64,
+                                            'ReceivedSvTimeNanos': np.int64,
+                                        }
                                     )
         return measurements
 
@@ -158,28 +169,41 @@ class AndroidRawGnss(NavData):
 
         # calculate pseudorange
         # FullBiasNanos 관련 계산을 float64로 강제
-        full_bias_nanos = self["FullBiasNanos"].astype(np.float64)
-        time_nanos = self["TimeNanos"].astype(np.float64)
-        time_offset_nanos = self["TimeOffsetNanos"].astype(np.float64)
-        bias_nanos = self["BiasNanos"].astype(np.float64)
 
-        # GPS 주 계산
-        gps_week_nanos = np.floor(-full_bias_nanos * 1e-9 / consts.WEEKSEC) * consts.WEEKSEC * 1e9
+        #                 # 1. 시간 관련 컬럼 읽기
+        # time_nanos        = self["TimeNanos"]
+        # time_offset_nanos = self["TimeOffsetNanos"]
+        # full_bias_nanos   = self["FullBiasNanos"]
+        # bias_nanos        = self["BiasNanos"]
+        # sv_time_nanos     = self["ReceivedSvTimeNanos"]
+
+        # 2. 상수 정의 (1주 단위 ns)
+        WEEK_NS = int(7 * 24 * 3600 * 1e9)
+
+        full_bias_nanos   = self["FullBiasNanos"]
+        time_nanos        = self["TimeNanos"]
+        time_offset_nanos = self["TimeOffsetNanos"]
+        bias_nanos        = self["BiasNanos"]
 
         # 송신-수신 시간차 계산
-        tx_rx_gnss_ns = time_nanos - full_bias_nanos + time_offset_nanos - bias_nanos
+        tx_rx_gnss_ns = (
+            (time_nanos % WEEK_NS).astype(np.float64)
+            + (time_offset_nanos % WEEK_NS).astype(np.float64)
+            - (full_bias_nanos[0] % WEEK_NS)
+            - (bias_nanos[0] % WEEK_NS)
+        )
 
         # 수신 시간 초기화
         t_rx_secs = np.zeros(len(self), dtype=np.float64)
 
         # gps constellation
-        tx_rx_gps_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
+        tx_rx_gps_secs = tx_rx_gnss_ns*1E-9
         t_rx_secs = np.where(self["gnss_id"]=="gps",
                              tx_rx_gps_secs,
                              t_rx_secs)
 
         # beidou constellation
-        tx_rx_beidou_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9 - 14.
+        tx_rx_beidou_secs = tx_rx_gnss_ns*1E-9 - 14.
         t_rx_secs = np.where(self["gnss_id"]=="beidou",
                              tx_rx_beidou_secs,
                              t_rx_secs)
@@ -193,45 +217,50 @@ class AndroidRawGnss(NavData):
                              t_rx_secs)
 
         # glonass constellation
-        nanos_per_day = 1E9*24*60*60
-        day_number_nanos = np.floor(-self["FullBiasNanos"]/nanos_per_day)*nanos_per_day
-        tx_rx_glonass_secs = (tx_rx_gnss_ns - day_number_nanos)*1E-9\
+        nanos_per_day = int(1E9*24*60*60)
+        day_number_nanos = np.floor(-self["FullBiasNanos"] // nanos_per_day)*nanos_per_day
+        tx_rx_glonass_secs = (tx_rx_gnss_ns - day_number_nanos).astype(np.float64)*1E-9\
                            + 3*60*60 - get_leap_seconds(self["gps_millis",0].item())
         t_rx_secs = np.where(self["gnss_id"]=="glonass",
                              tx_rx_glonass_secs,
                              t_rx_secs)
 
         # qzss constellation
-        tx_rx_qzss_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
+        tx_rx_qzss_secs = tx_rx_gnss_ns*1E-9
         t_rx_secs = np.where(self["gnss_id"]=="qzss",
                              tx_rx_qzss_secs,
                              t_rx_secs)
 
         # sbas constellation
-        tx_rx_sbas_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
+        tx_rx_sbas_secs = tx_rx_gnss_ns*1E-9
         t_rx_secs = np.where(self["gnss_id"]=="sbas",
                              tx_rx_sbas_secs,
                              t_rx_secs)
 
         # irnss constellation
-        tx_rx_irnss_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
+        tx_rx_irnss_secs = tx_rx_gnss_ns*1E-9
         t_rx_secs = np.where(self["gnss_id"]=="irnss",
                              tx_rx_irnss_secs,
                              t_rx_secs)
         # unknown constellation
-        tx_rx_unknown_secs = (tx_rx_gnss_ns - gps_week_nanos)*1E-9
+        tx_rx_unknown_secs = tx_rx_gnss_ns*1E-9
         t_rx_secs = np.where(self["gnss_id"]=="unknown",
                              tx_rx_unknown_secs,
                              t_rx_secs)
 
         # 송신 시각을 float64로 변환하여 초 단위로
-        t_tx_secs = self["ReceivedSvTimeNanos"].astype(np.float64) * 1e-9
+        t_tx_secs = self["ReceivedSvTimeNanos"] % WEEK_NS * 1e-9
 
         # 수신 시각과 송신 시각 차이로부터 의사거리 계산
         raw_pr_m = (t_rx_secs - t_tx_secs) * consts.C  # t_rx_secs는 이미 float64
 
         # 결과를 float64로 명시한 후 저장
-        self["raw_pr_m"] = raw_pr_m.astype(np.float64)
+        self["raw_pr_m"] = raw_pr_m
+
+        # 5. (선택) 불확도 등 추가
+        self["raw_pr_sigma_m"] = consts.C * 1e-9 * self["ReceivedSvTimeUncertaintyNanos"]
+        self["clock_drift"] = consts.C * 1e-9 * self["ReceivedSvTimeUncertaintyNanos"]
+        self["clock_drift_uncertainty"] = consts.C * 1e-9 * self["DriftUncertaintyNanosPerSecond"]
 
         if self.remove_rx_b_from_pr:
             # remove the receiver's clock bias at the first timestamp
