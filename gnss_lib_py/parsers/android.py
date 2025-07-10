@@ -73,7 +73,7 @@ class AndroidRawGnss(NavData):
                                         },
                  remove_rx_b_from_pr = False,
                  verbose=False):
-
+        
         self.verbose = verbose
         self.filter_measurements = filter_measurements
         self.measurement_filters = measurement_filters
@@ -117,6 +117,7 @@ class AndroidRawGnss(NavData):
                     skip_rows.append(row_idx)
                 row_idx += 1
 
+        print(header_row)
         measurements = pd.read_csv(input_path,
                                     skip_blank_lines = False,
                                     header = header_row,
@@ -134,6 +135,12 @@ class AndroidRawGnss(NavData):
                                             'ReceivedSvTimeNanos': np.int64,
                                         }
                                     )
+
+        print(measurements['FullBiasNanos'].unique())
+        target = 1423910252956658944
+        exists = target in measurements['FullBiasNanos'].values
+        print(f"값 존재 여부: {exists}")
+    
         return measurements
 
     def postprocess(self):
@@ -167,94 +174,156 @@ class AndroidRawGnss(NavData):
         # add gps milliseconds
         self["gps_millis"] = unix_to_gps_millis(self["unix_millis"])
 
+
         # calculate pseudorange
-        # FullBiasNanos 관련 계산을 float64로 강제
-
-        #                 # 1. 시간 관련 컬럼 읽기
-        # time_nanos        = self["TimeNanos"]
-        # time_offset_nanos = self["TimeOffsetNanos"]
-        # full_bias_nanos   = self["FullBiasNanos"]
-        # bias_nanos        = self["BiasNanos"]
-        # sv_time_nanos     = self["ReceivedSvTimeNanos"]
-
-        # 2. 상수 정의 (1주 단위 ns)
-        WEEK_NS = int(7 * 24 * 3600 * 1e9)
-
-        full_bias_nanos   = self["FullBiasNanos"]
-        time_nanos        = self["TimeNanos"]
-        time_offset_nanos = self["TimeOffsetNanos"]
-        bias_nanos        = self["BiasNanos"]
-
-        # 송신-수신 시간차 계산
-        tx_rx_gnss_ns = (
-            (time_nanos % WEEK_NS).astype(np.float64)
-            + (time_offset_nanos % WEEK_NS).astype(np.float64)
-            - (full_bias_nanos[0] % WEEK_NS)
-            - (bias_nanos[0] % WEEK_NS)
-        )
+        gps_week_nanos = (-self["FullBiasNanos",0] // (consts.WEEKSEC * int(1e9))) * (consts.WEEKSEC * int(1e9))
+        tx_rx_gnss_diff_ns = (self["TimeNanos"] - self["ReceivedSvTimeNanos"] - (self["FullBiasNanos"] + gps_week_nanos) )
+        # tx_rx_gnss_ns = self["TimeNanos"] - self["FullBiasNanos",0] + self["TimeOffsetNanos"] - self["BiasNanos",0]
 
         # 수신 시간 초기화
-        t_rx_secs = np.zeros(len(self), dtype=np.float64)
+        t_rx_ns = np.zeros(len(self), dtype=np.int64)
+        print(type(t_rx_ns[0]))
 
         # gps constellation
-        tx_rx_gps_secs = tx_rx_gnss_ns*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="gps",
-                             tx_rx_gps_secs,
-                             t_rx_secs)
-
+        tx_rx_gps_ns = tx_rx_gnss_diff_ns
+        t_rx_ns = np.where(self["gnss_id"]=="gps",
+                             tx_rx_gps_ns,
+                             t_rx_ns)
+        print('gps', type(t_rx_ns[0]))
+    
         # beidou constellation
-        tx_rx_beidou_secs = tx_rx_gnss_ns*1E-9 - 14.
-        t_rx_secs = np.where(self["gnss_id"]=="beidou",
+        tx_rx_beidou_secs = tx_rx_gnss_diff_ns - 14 * int(1e9)
+        t_rx_ns = np.where(self["gnss_id"]=="beidou",
                              tx_rx_beidou_secs,
-                             t_rx_secs)
+                             t_rx_ns)
+        print('beidou', type(t_rx_ns[0]))
 
         # galileo constellation
         # nanos_per_100ms = 100*1E6
         # ms_number_nanos = np.floor(-self["FullBiasNanos"]/nanos_per_100ms)*nanos_per_100ms
         # tx_rx_galileo_secs = (tx_rx_gnss_ns - ms_number_nanos)*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="galileo",
-                             tx_rx_gps_secs,
-                             t_rx_secs)
+        t_rx_ns = np.where(self["gnss_id"]=="galileo",
+                             tx_rx_gnss_diff_ns,
+                             t_rx_ns)
+        print('galileo', type(t_rx_ns[0]))
 
-        # glonass constellation
-        nanos_per_day = int(1E9*24*60*60)
-        day_number_nanos = np.floor(-self["FullBiasNanos"] // nanos_per_day)*nanos_per_day
-        tx_rx_glonass_secs = (tx_rx_gnss_ns - day_number_nanos).astype(np.float64)*1E-9\
-                           + 3*60*60 - get_leap_seconds(self["gps_millis",0].item())
-        t_rx_secs = np.where(self["gnss_id"]=="glonass",
-                             tx_rx_glonass_secs,
-                             t_rx_secs)
+        # nanos_per_day = int(1E9 * 24 * 60 * 60)
+        # day_number_nanos = (-self["FullBiasNanos"] // nanos_per_day * nanos_per_day).astype(np.int64)
+
+        # tx_rx_glonass_ns = (
+        #     (tx_rx_gnss_diff_ns - day_number_nanos) 
+        #     + int(3 * 60 * 60 * 1e9) 
+        #     - int(get_leap_seconds(self["gps_millis", 0].item()) * 1e9)
+        # )
+
+        # print('glonass', type(t_rx_ns[0]))
+
+        # t_rx_ns = np.where(
+        #     self["gnss_id"] == "glonass",
+        #     tx_rx_glonass_ns.astype(np.int64),  # 명시적으로 int64로 변환
+        #     t_rx_ns.astype(np.int64)            # 기존 값을 int64로 변환
+        # )
+
+        t_rx_ns = np.where(self["gnss_id"]=="glonass",
+                             tx_rx_gnss_diff_ns,
+                             t_rx_ns)
+        print('galileo', type(t_rx_ns[0]))
+
+        print('glonass', type(t_rx_ns[0]))
 
         # qzss constellation
-        tx_rx_qzss_secs = tx_rx_gnss_ns*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="qzss",
-                             tx_rx_qzss_secs,
-                             t_rx_secs)
+        tx_rx_qzss_ns = tx_rx_gnss_diff_ns
+        t_rx_ns = np.where(self["gnss_id"]=="qzss",
+                             tx_rx_qzss_ns,
+                             t_rx_ns)
 
         # sbas constellation
-        tx_rx_sbas_secs = tx_rx_gnss_ns*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="sbas",
-                             tx_rx_sbas_secs,
-                             t_rx_secs)
+        tx_rx_sbas_ns = tx_rx_gnss_diff_ns
+        t_rx_ns = np.where(self["gnss_id"]=="sbas",
+                             tx_rx_sbas_ns,
+                             t_rx_ns)
 
         # irnss constellation
-        tx_rx_irnss_secs = tx_rx_gnss_ns*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="irnss",
+        tx_rx_irnss_secs = tx_rx_gnss_diff_ns
+        t_rx_ns = np.where(self["gnss_id"]=="irnss",
                              tx_rx_irnss_secs,
-                             t_rx_secs)
+                             t_rx_ns)
         # unknown constellation
-        tx_rx_unknown_secs = tx_rx_gnss_ns*1E-9
-        t_rx_secs = np.where(self["gnss_id"]=="unknown",
+        tx_rx_unknown_secs = tx_rx_gnss_diff_ns
+        t_rx_ns = np.where(self["gnss_id"]=="unknown",
                              tx_rx_unknown_secs,
-                             t_rx_secs)
+                             t_rx_ns)
+        
+        print('qzss', type(t_rx_ns[0]))
+    
 
-        # 송신 시각을 float64로 변환하여 초 단위로
-        t_tx_secs = self["ReceivedSvTimeNanos"] % WEEK_NS * 1e-9
+        # 최종 계산 과정
+        final_calculation = t_rx_ns + (self["TimeOffsetNanos"] - self["BiasNanos", 0])
+        print('final_calc', type(t_rx_ns[0]))
 
         # 수신 시각과 송신 시각 차이로부터 의사거리 계산
-        raw_pr_m = (t_rx_secs - t_tx_secs) * consts.C  # t_rx_secs는 이미 float64
+        raw_pr_m = final_calculation * (consts.C * 1E-9)  # t_rx_secs는 이미 float64
 
-        # 결과를 float64로 명시한 후 저장
+        negative_indices = np.where(raw_pr_m < 0)[0]
+
+
+
+        def print_debug_info(
+            idx,
+            gnss_id,
+            code_type,
+            raw_pr_m,
+            full_bias_nanos,
+            time_nanos,
+            received_sv_time_nanos,
+            time_offset_nanos,
+            bias_nanos,
+            gps_week_nanos,
+            tx_rx_gnss_diff_ns,
+            t_rx_ns,
+            final_calculation,
+        ):
+            print(f"\n[DEBUG] 음수 Pseudorange 발생 at index {idx}")
+            print(f"\nGnss id and cod type : {gnss_id} / {code_type}")
+            print(f"raw_pr_m              = {raw_pr_m:.10f} m")
+
+            print("\n--- GNSS Timing Info ---")
+            print(f"FullBiasNanos         = {full_bias_nanos} / {type(full_bias_nanos)}")
+            print(f"TimeNanos             = {time_nanos} / {type(full_bias_nanos)}")
+            print(f"ReceivedSvTimeNanos   = {received_sv_time_nanos} / {type(full_bias_nanos)}")
+            print(f"TimeOffsetNanos       = {time_offset_nanos:.10f}")
+            print(f"BiasNanos             = {bias_nanos:.10f}")
+            print(f"gps_week_nanos        = {gps_week_nanos:.10f}")
+
+            print("\n--- 계산 중간 결과 ---")
+            print(f"t_rx_ns               = {t_rx_ns:.10f}")
+            print(f"tx_rx_gnss_diff_ns    = {tx_rx_gnss_diff_ns:.10f}")
+            print(f"final_calculation     = {final_calculation:.10f}")
+            print("-" * 60)
+
+        self_df = self.pandas_df()
+
+        # 음수인 경우 디버깅 정보 출력
+        negative_indices = np.where(raw_pr_m < 0)[0]
+        if len(negative_indices) > 0 and False:
+            for idx in negative_indices:
+                print_debug_info(
+                    idx=idx,
+                    gnss_id=self_df['gnss_id'][idx],
+                    code_type=self_df['CodeType'][idx],
+                    raw_pr_m=raw_pr_m[idx],
+                    full_bias_nanos=self["FullBiasNanos"][idx],
+                    time_nanos=self["TimeNanos"][idx],
+                    received_sv_time_nanos=self["ReceivedSvTimeNanos"][idx],
+                    time_offset_nanos=self["TimeOffsetNanos"][idx],
+                    bias_nanos=self["BiasNanos"][idx],
+                    gps_week_nanos=gps_week_nanos[idx],
+                    tx_rx_gnss_diff_ns=tx_rx_gnss_diff_ns[idx],
+                    t_rx_ns=t_rx_ns[idx],
+                    final_calculation=final_calculation[idx],
+                )
+                input('Press to see next')
+
         self["raw_pr_m"] = raw_pr_m
 
         # 5. (선택) 불확도 등 추가
@@ -279,8 +348,8 @@ class AndroidRawGnss(NavData):
         self['clock_drift'] = consts.C * 1E-9 * self["ReceivedSvTimeUncertaintyNanos"]
         self['clock_drift_uncertainty'] = consts.C * 1E-9 * self['DriftUncertaintyNanosPerSecond']
         
-        if self.filter_measurements:
-            self.filter_raw_measurements(t_rx_secs)
+        # if self.filter_measurements:
+        #     self.filter_raw_measurements(t_rx_secs)
 
     def filter_raw_measurements(self,t_rx_secs):
         """Filter noisy measurements.
